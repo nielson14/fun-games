@@ -1,0 +1,326 @@
+import { useState, useEffect, useRef, useCallback } from "react";
+
+const CELL = 28;
+const COLS = 17;
+const ROWS = 13;
+
+const UPGRADES = [
+  { id: "speed", label: "Speed", desc: "Move faster through the maze.", icon: "ti-bolt", costs: [20, 50, 100], effect: "Reduces step delay." },
+  { id: "shield", label: "Shield", desc: "Thieves steal fewer coins.", icon: "ti-shield", costs: [15, 40, 90], effect: "Reduces theft by 1 coin per level." },
+  { id: "greed", label: "Greed", desc: "Find more coins per pickup.", icon: "ti-coin", costs: [25, 60, 120], effect: "Each coin worth +2 more per level." },
+];
+
+const DIRS = [
+  { dx: 0, dy: -1 },
+  { dx: 1, dy: 0 },
+  { dx: 0, dy: 1 },
+  { dx: -1, dy: 0 },
+];
+
+function generateMaze(cols, rows) {
+  const grid = Array.from({ length: rows }, () =>
+    Array.from({ length: cols }, () => ({ n: true, e: true, s: true, w: true, visited: false }))
+  );
+  const stack = [{ x: 0, y: 0 }];
+  grid[0][0].visited = true;
+  while (stack.length) {
+    const cur = stack[stack.length - 1];
+    const neighbors = [];
+    const checks = [
+      { dx: 0, dy: -1, wall: "n", opp: "s" },
+      { dx: 1, dy: 0, wall: "e", opp: "w" },
+      { dx: 0, dy: 1, wall: "s", opp: "n" },
+      { dx: -1, dy: 0, wall: "w", opp: "e" },
+    ];
+    for (const c of checks) {
+      const nx = cur.x + c.dx, ny = cur.y + c.dy;
+      if (nx >= 0 && nx < cols && ny >= 0 && ny < rows && !grid[ny][nx].visited)
+        neighbors.push({ ...c, nx, ny });
+    }
+    if (neighbors.length) {
+      const pick = neighbors[Math.floor(Math.random() * neighbors.length)];
+      grid[cur.y][cur.x][pick.wall] = false;
+      grid[pick.ny][pick.nx][pick.opp] = false;
+      grid[pick.ny][pick.nx].visited = true;
+      stack.push({ x: pick.nx, y: pick.ny });
+    } else stack.pop();
+  }
+  return grid;
+}
+
+function wallFollowPath(grid, cols, rows, hand) {
+  const path = [{ x: 0, y: 0 }];
+  let x = 0, y = 0, dir = 1;
+  const goal = { x: cols - 1, y: rows - 1 };
+  let steps = 0;
+  const max = cols * rows * 12;
+  while (!(x === goal.x && y === goal.y) && steps < max) {
+    steps++;
+    const cell = grid[y][x];
+    const wk = ["n", "e", "s", "w"];
+    const tries = hand === "right"
+      ? [(dir+1)%4, dir, (dir+3)%4, (dir+2)%4]
+      : [(dir+3)%4, dir, (dir+1)%4, (dir+2)%4];
+    for (const t of tries) {
+      if (!cell[wk[t]]) {
+        dir = t;
+        x += DIRS[t].dx;
+        y += DIRS[t].dy;
+        path.push({ x, y });
+        break;
+      }
+    }
+  }
+  return path;
+}
+
+function seedEvents(path, level) {
+  const events = {};
+  const eligible = path.slice(1, -1);
+  const numCoins = Math.min(3 + level, 8);
+  const numThieves = Math.min(1 + Math.floor(level / 2), 4);
+  const used = new Set();
+  const pick = () => {
+    for (let i = 0; i < 100; i++) {
+      const idx = Math.floor(Math.random() * eligible.length);
+      const k = `${eligible[idx].x},${eligible[idx].y}`;
+      if (!used.has(k)) { used.add(k); return k; }
+    }
+    return null;
+  };
+  for (let i = 0; i < numCoins; i++) { const k = pick(); if (k) events[k] = "coin"; }
+  for (let i = 0; i < numThieves; i++) { const k = pick(); if (k) events[k] = "thief"; }
+  return events;
+}
+
+const FLAVORS = {
+  coin: ["A glint of gold!", "Loot found!", "Coins clink at your feet.", "A hidden stash!"],
+  thief: ["Ambushed!", "A shadow darts past...", "Pickpocketed!", "Thieves lurk here."],
+  finish: ["You escaped!", "Freedom at last!", "The maze is conquered!", "Light ahead — you're out!"],
+};
+const rand = arr => arr[Math.floor(Math.random() * arr.length)];
+
+const SPEED_DELAYS = [220, 160, 100, 55];
+
+export default function App() {
+  const [screen, setScreen] = useState("menu");
+  const [level, setLevel] = useState(1);
+  const [totalCoins, setTotalCoins] = useState(0);
+  const [upgrades, setUpgrades] = useState({ speed: 0, shield: 0, greed: 0 });
+  const [hand, setHand] = useState(null);
+  const [maze, setMaze] = useState(null);
+  const [path, setPath] = useState([]);
+  const [events, setEvents] = useState({});
+  const [step, setStep] = useState(0);
+  const [log, setLog] = useState([]);
+  const [runCoins, setRunCoins] = useState(0);
+  const [runLost, setRunLost] = useState(0);
+  const [visited, setVisited] = useState(new Set());
+  const [triggedEvents, setTriggeredEvents] = useState(new Set());
+  const intervalRef = useRef(null);
+  const logRef = useRef(null);
+
+  const cols = Math.min(COLS, 9 + level * 2);
+  const rows = Math.min(ROWS, 7 + level);
+
+  const startRun = useCallback((chosenHand) => {
+    const g = generateMaze(cols, rows);
+    const p = wallFollowPath(g, cols, rows, chosenHand);
+    const ev = seedEvents(p, level);
+    setMaze(g); setPath(p); setEvents(ev);
+    setStep(0); setLog([`Level ${level} — ${chosenHand} hand on the wall...`]);
+    setRunCoins(0); setRunLost(0);
+    setVisited(new Set()); setTriggeredEvents(new Set());
+    setHand(chosenHand); setScreen("run");
+  }, [cols, rows, level]);
+
+  useEffect(() => {
+    if (screen !== "run" || !path.length) return;
+    if (step >= path.length) return;
+    const delay = SPEED_DELAYS[upgrades.speed] ?? 55;
+    intervalRef.current = setTimeout(() => {
+      const pos = path[step];
+      const key = `${pos.x},${pos.y}`;
+      setVisited(v => new Set(v).add(key));
+
+      if (events[key]) {
+        setTriggeredEvents(t => {
+          if (t.has(key)) return t;
+          const next = new Set(t).add(key);
+          const ev = events[key];
+          if (ev === "coin") {
+            const base = 5 + upgrades.greed * 2;
+            setRunCoins(c => c + base);
+            setTotalCoins(c => c + base);
+            setLog(l => [...l, `${rand(FLAVORS.coin)}`]);
+          } else {
+            const loss = Math.max(1, 3 - upgrades.shield);
+            setRunCoins(c => Math.max(0, c - loss));
+            setRunLost(r => r + loss);
+            setTotalCoins(c => Math.max(0, c - loss));
+            setLog(l => [...l, `${rand(FLAVORS.thief)}`]);
+          }
+          return next;
+        });
+      }
+
+      if (step === path.length - 1) {
+        setLog(l => [...l, rand(FLAVORS.finish)]);
+        setScreen("result");
+        return;
+      }
+      setStep(s => s + 1);
+    }, delay);
+    return () => clearTimeout(intervalRef.current);
+  }, [screen, step, path, events, upgrades]);
+
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [log]);
+
+  const buyUpgrade = (id) => {
+    const lvl = upgrades[id];
+    const u = UPGRADES.find(u => u.id === id);
+    if (lvl >= u.costs.length) return;
+    const cost = u.costs[lvl];
+    if (totalCoins < cost) return;
+    setTotalCoins(c => c - cost);
+    setUpgrades(u => ({ ...u, [id]: u[id] + 1 }));
+  };
+
+  const nextLevel = () => { setLevel(l => l + 1); setScreen("menu"); };
+
+  const W = cols * CELL + 1;
+  const H = rows * CELL + 1;
+  const cur = path[step] || { x: 0, y: 0 };
+
+  const btnStyle = {
+    padding: "10px 0", fontSize: 14, cursor: "pointer",
+    background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-secondary)",
+    borderRadius: 8, color: "var(--color-text-primary)", fontFamily: "var(--font-sans)", width: "100%"
+  };
+
+  return (
+    <div style={{ fontFamily: "var(--font-sans)", padding: "1.5rem 1rem", maxWidth: 520, margin: "0 auto" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "1.25rem" }}>
+        <div>
+          <h2 style={{ fontSize: 18, fontWeight: 500, margin: "0 0 2px", color: "var(--color-text-primary)" }}>Wall-Follower</h2>
+          <p style={{ fontSize: 13, color: "var(--color-text-secondary)", margin: 0 }}>Level {level}</p>
+        </div>
+        <div style={{ background: "var(--color-background-secondary)", borderRadius: 8, padding: "6px 14px", fontSize: 13 }}>
+          <span style={{ color: "var(--color-text-secondary)" }}>Coins </span>
+          <span style={{ fontWeight: 500 }}>{totalCoins}</span>
+        </div>
+      </div>
+
+      {screen === "menu" && (
+        <>
+          <p style={{ fontSize: 14, color: "var(--color-text-secondary)", marginBottom: "1rem" }}>
+            Choose your wall. Your adventurer will do the rest.
+          </p>
+          <div style={{ display: "flex", gap: 12, marginBottom: "1.5rem" }}>
+            <button onClick={() => startRun("left")} style={{ ...btnStyle }}>Left hand</button>
+            <button onClick={() => startRun("right")} style={{ ...btnStyle }}>Right hand</button>
+          </div>
+
+          <p style={{ fontSize: 13, fontWeight: 500, color: "var(--color-text-primary)", marginBottom: "0.75rem" }}>Upgrades</p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {UPGRADES.map(u => {
+              const lvl = upgrades[u.id];
+              const maxed = lvl >= u.costs.length;
+              const cost = maxed ? null : u.costs[lvl];
+              const canBuy = !maxed && totalCoins >= cost;
+              return (
+                <div key={u.id} style={{
+                  display: "flex", alignItems: "center", gap: 12,
+                  background: "var(--color-background-secondary)", borderRadius: 8, padding: "10px 14px"
+                }}>
+                  <i className={`ti ${u.icon}`} style={{ fontSize: 18, color: "var(--color-text-secondary)" }} aria-hidden="true" />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500, color: "var(--color-text-primary)" }}>
+                      {u.label} <span style={{ fontWeight: 400, color: "var(--color-text-secondary)" }}>
+                        {"●".repeat(lvl)}{"○".repeat(u.costs.length - lvl)}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--color-text-secondary)" }}>{u.desc}</div>
+                  </div>
+                  <button
+                    onClick={() => buyUpgrade(u.id)}
+                    disabled={!canBuy}
+                    style={{
+                      fontSize: 12, padding: "5px 12px", borderRadius: 6, cursor: canBuy ? "pointer" : "default",
+                      background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-secondary)",
+                      color: maxed ? "var(--color-text-tertiary)" : canBuy ? "var(--color-text-primary)" : "var(--color-text-tertiary)",
+                      fontFamily: "var(--font-sans)", whiteSpace: "nowrap"
+                    }}>
+                    {maxed ? "Maxed" : `${cost} coins`}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {(screen === "run" || screen === "result") && maze && (
+        <>
+          <svg width={W} height={H} style={{ display: "block", marginBottom: "1rem", borderRadius: 6, border: "0.5px solid #ccc" }}>
+            <rect width={W} height={H} fill="#F5F0E8" />
+            {maze.map((row, ry) =>
+              row.map((cell, cx) => {
+                const x = cx * CELL, y = ry * CELL;
+                const key = `${cx},${ry}`;
+                const isVisited = visited.has(key);
+                const ev = events[key];
+                const triggered = triggedEvents?.has(key);
+                return (
+                  <g key={key}>
+                    {isVisited && <rect x={x+1} y={y+1} width={CELL-1} height={CELL-1} fill="#1D9E7530" />}
+                    {ev === "coin" && !triggered && <circle cx={x+CELL/2} cy={y+CELL/2} r={4} fill="#BA7517" />}
+                    {ev === "thief" && !triggered && <rect x={x+CELL/2-4} y={y+CELL/2-4} width={8} height={8} fill="#993556" />}
+                    {cell.n && <line x1={x} y1={y} x2={x+CELL} y2={y} stroke="#1a1a1a" strokeWidth={1.5} />}
+                    {cell.e && cx === cols-1 && <line x1={x+CELL} y1={y} x2={x+CELL} y2={y+CELL} stroke="#1a1a1a" strokeWidth={1.5} />}
+                    {cell.s && <line x1={x} y1={y+CELL} x2={x+CELL} y2={y+CELL} stroke="#1a1a1a" strokeWidth={1.5} />}
+                    {cell.w && ry === 0 && <line x1={x} y1={y} x2={x} y2={y+CELL} stroke="#1a1a1a" strokeWidth={1.5} />}
+                    {cell.e && <line x1={x+CELL} y1={y} x2={x+CELL} y2={y+CELL} stroke="#1a1a1a" strokeWidth={1.5} />}
+                    {cell.w && <line x1={x} y1={y} x2={x} y2={y+CELL} stroke="#1a1a1a" strokeWidth={1.5} />}
+                  </g>
+                );
+              })
+            )}
+            <rect x={(cols-1)*CELL+4} y={(rows-1)*CELL+4} width={CELL-8} height={CELL-8} rx={3} fill="#534AB733" stroke="#534AB7" strokeWidth={1} />
+            <circle cx={cur.x*CELL+CELL/2} cy={cur.y*CELL+CELL/2} r={7} fill="#1D9E75" />
+            <circle cx={cur.x*CELL+CELL/2} cy={cur.y*CELL+CELL/2} r={4} fill="#F5F0E8" />
+          </svg>
+
+          <div ref={logRef} style={{
+            height: 80, overflowY: "auto", background: "var(--color-background-secondary)",
+            borderRadius: 8, padding: "8px 12px", fontSize: 12, color: "var(--color-text-secondary)",
+            lineHeight: 1.8, marginBottom: "1rem"
+          }}>
+            {log.map((l, i) => <div key={i}>{l}</div>)}
+          </div>
+
+          {screen === "run" && (
+            <div style={{ fontSize: 13, color: "var(--color-text-secondary)", textAlign: "center" }}>
+              Step {step}
+            </div>
+          )}
+
+          {screen === "result" && (
+            <div style={{ background: "var(--color-background-secondary)", borderRadius: 10, padding: "1rem 1.25rem", marginBottom: "1rem" }}>
+              <p style={{ fontSize: 14, fontWeight: 500, color: "var(--color-text-primary)", margin: "0 0 6px" }}>Run complete</p>
+              <div style={{ fontSize: 13, color: "var(--color-text-secondary)", lineHeight: 2 }}>
+                <div>Steps taken: <span style={{ color: "var(--color-text-primary)", fontWeight: 500 }}>{path.length}</span></div>
+                <div>Coins found: <span style={{ color: "var(--color-text-primary)", fontWeight: 500 }}>+{runCoins + runLost}</span></div>
+                <div>Lost to thieves: <span style={{ color: "var(--color-text-primary)", fontWeight: 500 }}>-{runLost}</span></div>
+                <div>Net earned: <span style={{ color: "var(--color-text-primary)", fontWeight: 500 }}>{runCoins}</span></div>
+              </div>
+              <button onClick={nextLevel} style={{ ...btnStyle, marginTop: "1rem" }}>Next level</button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}

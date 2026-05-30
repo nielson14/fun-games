@@ -165,8 +165,8 @@ function App() {
   const intervalRef = useRef(null);
   const logRef = useRef(null);
 
-  const cols = Math.min(COLS, 9 + level * 2);
-  const rows = Math.min(ROWS, 7 + level);
+  const cols = 7 + level * 2;
+  const rows = 5 + level;
 
   useEffect(() => {
     try {
